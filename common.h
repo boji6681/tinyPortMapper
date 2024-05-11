@@ -19,34 +19,56 @@
 
 #include<unistd.h>
 #include<errno.h>
-#include <sys/epoll.h>
-#include <sys/wait.h>
-#include <sys/socket.h>    //for socket ofcourse
-#include <sys/types.h>
-#include <sys/stat.h>
+//#include <sys/epoll.h>
+//#include <sys/wait.h>
+//#include <sys/socket.h>    //for socket ofcourse
+//#include <sys/types.h>
+//#include <sys/stat.h>
 #include <stdlib.h> //for exit(0);
 #include <errno.h> //For errno - the error number
-#include <netinet/tcp.h>   //Provides declarations for tcp header
-#include <netinet/udp.h>
-#include <netinet/ip.h>    //Provides declarations for ip header
-#include <netinet/if_ether.h>
-#include <arpa/inet.h>
+//#include <netinet/tcp.h>   //Provides declarations for tcp header
+//#include <netinet/udp.h>
+//#include <netinet/ip.h>    //Provides declarations for ip header
+//#include <netinet/if_ether.h>
+//#include <arpa/inet.h>
 #include <fcntl.h>
-#include <byteswap.h>
-#include <arpa/inet.h>
-#include <linux/if_ether.h>
-#include <linux/filter.h>
+//#include <byteswap.h>
+//#include <linux/if_ether.h>
+//#include <linux/filter.h>
 #include <sys/time.h>
 #include <time.h>
-#include <sys/timerfd.h>
-#include <sys/ioctl.h>
-#include <netinet/in.h>
-#include <net/if.h>
-#include <arpa/inet.h>
+//#include <sys/timerfd.h>
+//#include <sys/ioctl.h>
+//#include <netinet/in.h>
+//#include <net/if.h>
+//#include <arpa/inet.h>
 #include <stdarg.h>
 #include <assert.h>
-#include <linux/if_packet.h>
-#include <linux/if_tun.h>
+
+#if !defined(NO_LIBEV_EMBED)
+#include <my_ev.h>
+#else
+#include "ev.h"
+#endif
+
+#if defined(__MINGW32__)
+#include <winsock2.h>
+#include <ws2tcpip.h>
+typedef unsigned char u_int8_t;
+typedef unsigned short u_int16_t;
+typedef unsigned int u_int32_t;
+typedef int socklen_t;
+#else
+#include <sys/socket.h>    //for socket ofcourse
+#include <sys/types.h>
+#include <sys/ioctl.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#endif
+
+
+//#include <linux/if_packet.h>
+//#include <linux/if_tun.h>
 
 #include<unordered_map>
 #include<unordered_set>
@@ -57,6 +79,15 @@
 #include <deque>
 //#include <pair>
 using  namespace std;
+
+#if defined(__MINGW32__)
+int inet_pton(int af, const char *src, void *dst);
+const char *inet_ntop(int af, const void *src, char *dst, socklen_t size);
+#define setsockopt(a,b,c,d,e) setsockopt(a,b,c,(const char *)(d),e)
+#endif
+
+char *get_sock_error();
+int get_sock_errno();
 
 
 typedef unsigned long long u64_t;   //this works on most platform,avoid using the PRId64
@@ -78,7 +109,7 @@ const int max_addr_len=100;
 const int max_data_len_udp=65536;
 const int max_data_len_tcp=4096*4;
 
-const u32_t conn_timeout_udp=240000;
+const u32_t conn_timeout_udp=180000;
 const u32_t conn_timeout_tcp=360000;
 
 const int max_conn_num=20000;
@@ -96,6 +127,23 @@ extern int socket_buf_size;
 
 typedef u64_t fd64_t;
 
+
+
+#if defined(__MINGW32__)
+typedef SOCKET my_fd_t;
+inline int sock_close(my_fd_t fd)
+{
+	return closesocket(fd);
+}
+#else
+typedef int my_fd_t;
+inline int sock_close(my_fd_t fd)
+{
+	return close(fd);
+}
+
+#endif
+
 struct not_copy_able_t
 {
 	not_copy_able_t()
@@ -106,16 +154,18 @@ struct not_copy_able_t
 	{
 		assert(0==1);
 	}
-	not_copy_able_t & operator=(const not_copy_able_t &other)
+	const not_copy_able_t & operator=(const not_copy_able_t &other)
 	{
 		assert(0==1);
+		return other;
 	}
 };
 
 struct tcp_info_t:not_copy_able_t
 {
 	fd64_t fd64;
-	epoll_event ev;
+	ev_io ev;
+	//epoll_event ev;
 	//char * data;
 	char data[max_data_len_tcp+200];//use a larger buffer than udp
 	char * begin;
@@ -142,8 +192,11 @@ struct tcp_info_t:not_copy_able_t
 	}*/
 };
 
+int init_ws();
+
 u32_t djb2(unsigned char *str,int len);
 u32_t sdbm(unsigned char *str,int len);
+
 
 struct address_t  //TODO scope id
 {
@@ -211,6 +264,8 @@ struct udp_pair_t:not_copy_able_t
 {
 	address_t adress;
 	fd64_t fd64;
+	ev_io ev;
+	int local_listen_fd;
 	//u64_t last_active_time;
 	char addr_s[max_addr_len];
 	list<udp_pair_t>::iterator it;
@@ -262,20 +317,20 @@ char * my_ntoa(u32_t ip);
 
 void myexit(int a);
 void init_random_number_fd();
-u64_t get_true_random_number_64();
-u32_t get_true_random_number();
-u32_t get_true_random_number_nz();
+u64_t get_fake_random_number_64();
+u32_t get_fake_random_number();
+u32_t get_fake_random_number_nz();
 u64_t ntoh64(u64_t a);
 u64_t hton64(u64_t a);
 bool larger_than_u16(uint16_t a,uint16_t b);
 bool larger_than_u32(u32_t a,u32_t b);
 void setnonblocking(int sock);
 
-int set_buf_size(int fd,int socket_buf_size,int force_socket_buf=0);
+int set_buf_size(int fd,int socket_buf_size);
 
 void  signal_handler(int sig);
 
-void get_true_random_chars(char * s,int len);
+void get_fake_random_chars(char * s,int len);
 int random_between(u32_t a,u32_t b);
 
 
